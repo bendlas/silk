@@ -44,7 +44,8 @@
   "Takes a query map.
   Returns a string of query pairs encoded and joined."
   [query]
-  (str/join "&" (for [[k v] (sort query)]
+  (str/join "&" (for [[k vs] (sort query)
+                      v vs]
                   (str (encode k) "=" (encode v)))))
 
 (defn decode-query
@@ -55,7 +56,9 @@
     (->> (str/split s #"[&;]")
          (reduce (fn [q pair]
                    (let [[k v] (map decode (str/split pair #"="))]
-                     (assoc! q k v)))
+                     (assoc! q k
+                             (conj (get q k [])
+                                   v))))
                  (transient {}))
          persistent!)
     {}))
@@ -128,6 +131,37 @@
        (map (fn [[k v]]
               (v (get params k))))
        (every? identity)))
+
+(defn update-query [q multi?]
+  (when q
+    (persistent!
+     (reduce-kv (fn [tres k v]
+                  (if (and multi? (multi? k))
+                    tres
+                    (do
+                      (when (< 1 (count v))
+                        (js/console.warn "Multiple values for parm" k v "choosing first"))
+                      (assoc! tres k (nth v 0)))))
+                (transient q) q))))
+
+(defn downdate-query [q multi?]
+  (when q
+    (persistent!
+     (reduce-kv (fn [tres k v]
+                  (let [ks (name k)]
+                    (assoc! tres k
+                            (if (and multi? (multi? ks))
+                              (if (coll? v)
+                                v
+                                (do (js/console.warn "Single value for multi-param" k "extending to multi")
+                                    [v]))
+                              (if (coll? v)
+                                (do
+                                  (when (< 1 (count v))
+                                    (js/console.warn "Multiple values output for parm" k v "choosing first"))
+                                  [(nth v 0)])
+                                [v])))))
+                (transient q) q))))
 
 (defn match [ptrn x]
   {:pre [(pattern? ptrn)]
@@ -352,15 +386,17 @@
 
 ;;;; Route Pattern ;;;;
 
-(deftype Route [name pattern]
+(deftype Route [name pattern args]
   Pattern
   (-match [this -url]
-          (when-let [params (match pattern (url -url))]
-            (assoc params ::name name ::pattern pattern)))
+    (when-let [params (match pattern (update (url -url) :query update-query
+                                             (:multi? args)))]
+      (assoc params ::name name ::pattern pattern)))
   (-unmatch [this params]
-            (->> (dissoc params ::name ::pattern)
-                 (unmatch pattern)
-                 url))
+    (-> (dissoc params ::name ::pattern)
+        (downdate-query (:multi? args))
+        (->> (unmatch pattern))
+        url))
   (-match-validator [_]
                     map?)
   (-unmatch-validators [_]
@@ -379,8 +415,8 @@
 (defn route [x]
   (if (route? x)
     x
-    (let [[nm ptrn] x]
-      (->Route nm (url-pattern ptrn)))))
+    (let [[nm ptrn args] x]
+      (->Route nm (url-pattern ptrn) args))))
 
 
 ;;;; Routes Pattern ;;;;
